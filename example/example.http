@@ -1,6 +1,9 @@
 ### get user info
 GET http://localhost:8181/user/2
 
+### get user info
+GET http://localhost:8181/user2/2
+
 ### get user info from Spring RSocketRequester
 GET http://localhost:8181/user/requester/2
 
@@ -18,6 +21,9 @@ GET http://localhost:8181/user/avatar
 
 ### ByteBuf as param and ByteBuf as return
 GET http://localhost:8181/user/bytebuf
+
+### cloudevents
+GET http://localhost:8181/user/cloudevents
 
 ### get account info
 GET http://localhost:8181/account/1

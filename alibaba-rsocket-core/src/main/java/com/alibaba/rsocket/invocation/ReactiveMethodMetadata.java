@@ -5,6 +5,7 @@ import com.alibaba.rsocket.ServiceMapping;
 import com.alibaba.rsocket.metadata.*;
 import com.alibaba.rsocket.reactive.ReactiveMethodSupport;
 import com.alibaba.rsocket.utils.MurmurHash3;
+import io.cloudevents.CloudEvent;
 import io.micrometer.core.instrument.Tag;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.CompositeByteBuf;
@@ -20,8 +21,9 @@ import java.lang.reflect.Method;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
+
+import static com.alibaba.rsocket.constants.ReactiveStreamConstants.REACTIVE_STREAMING_CLASSES;
 
 /**
  * reactive method metadata for service interface
@@ -29,9 +31,7 @@ import java.util.List;
  * @author leijuan
  */
 public class ReactiveMethodMetadata extends ReactiveMethodSupport {
-    public static final List<String> STREAM_CLASSES = Arrays.asList("io.reactivex.Flowable", "io.reactivex.Observable",
-            "io.reactivex.rxjava3.core.Observable", "io.reactivex.rxjava3.core.Flowable", "reactor.core.publisher.Flux",
-            "kotlinx.coroutines.flow.Flow");
+
     /**
      * service full name, format as com.alibaba.user.UserService
      */
@@ -107,6 +107,10 @@ public class ReactiveMethodMetadata extends ReactiveMethodSupport {
         if (serviceMapping != null) {
             initServiceMapping(serviceMapping);
         }
+        //CloudEvent detection
+        if (inferredClassForReturn.equals(CloudEvent.class)) {
+            this.acceptEncodingTypes = new RSocketMimeType[]{RSocketMimeType.CloudEventsJson};
+        }
         //RSocketRemoteServiceBuilder has higher priority with group,version,endpoint than @ServiceMapping from RSocketRemoteServiceBuilder
         this.group = group;
         this.version = version;
@@ -116,19 +120,21 @@ public class ReactiveMethodMetadata extends ReactiveMethodSupport {
         this.fullName = this.service + "." + this.name;
         this.serviceId = MurmurHash3.hash32(ServiceLocator.serviceId(this.group, this.service, this.version));
         this.handlerId = MurmurHash3.hash32(service + "." + name);
-        //byte buffer binary encoding
+        //byte buffer binary encoding for Bytebuf, should after initServiceMapping()
         if (paramCount == 1) {
             Class<?> parameterType = method.getParameterTypes()[0];
             if (BINARY_CLASS_LIST.contains(parameterType)) {
                 this.paramEncoding = RSocketMimeType.Binary;
+            } else if (parameterType.equals(CloudEvent.class)) {
+                this.paramEncoding = RSocketMimeType.CloudEventsJson;
             }
         }
         //init composite metadata for invocation
         initCompositeMetadata(origin);
         //bi direction check: param's type is Flux for 1st param or 2nd param
-        if (paramCount == 1 && STREAM_CLASSES.contains(method.getParameterTypes()[0].getCanonicalName())) {
+        if (paramCount == 1 && REACTIVE_STREAMING_CLASSES.contains(method.getParameterTypes()[0].getCanonicalName())) {
             rsocketFrameType = FrameType.REQUEST_CHANNEL;
-        } else if (paramCount == 2 && STREAM_CLASSES.contains(method.getParameterTypes()[1].getCanonicalName())) {
+        } else if (paramCount == 2 && REACTIVE_STREAMING_CLASSES.contains(method.getParameterTypes()[1].getCanonicalName())) {
             rsocketFrameType = FrameType.REQUEST_CHANNEL;
         }
         if (rsocketFrameType != null && rsocketFrameType == FrameType.REQUEST_CHANNEL) {
@@ -141,7 +147,7 @@ public class ReactiveMethodMetadata extends ReactiveMethodSupport {
             // fire_and_forget
             if (returnType.equals(Void.TYPE) || (returnType.equals(Mono.class) && inferredClassForReturn.equals(Void.TYPE))) {
                 this.rsocketFrameType = FrameType.REQUEST_FNF;
-            } else if (returnType.equals(Flux.class) || STREAM_CLASSES.contains(returnType.getCanonicalName())) {  // request/stream
+            } else if (returnType.equals(Flux.class) || REACTIVE_STREAMING_CLASSES.contains(returnType.getCanonicalName())) {  // request/stream
                 this.rsocketFrameType = FrameType.REQUEST_STREAM;
             } else { //request/response
                 this.rsocketFrameType = FrameType.REQUEST_RESPONSE;
@@ -194,7 +200,7 @@ public class ReactiveMethodMetadata extends ReactiveMethodSupport {
         //payload binary routing metadata
         BinaryRoutingMetadata binaryRoutingMetadata = new BinaryRoutingMetadata(this.serviceId, this.handlerId,
                 routingMetadata.assembleRoutingKey().getBytes(StandardCharsets.UTF_8));
-        if(this.sticky) {
+        if (this.sticky) {
             binaryRoutingMetadata.setSticky(true);
         }
         //add param encoding

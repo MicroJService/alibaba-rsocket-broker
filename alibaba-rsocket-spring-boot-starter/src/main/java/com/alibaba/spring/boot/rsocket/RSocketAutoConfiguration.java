@@ -4,16 +4,18 @@ import brave.Tracing;
 import com.alibaba.rsocket.RSocketAppContext;
 import com.alibaba.rsocket.RSocketRequesterSupport;
 import com.alibaba.rsocket.cloudevents.CloudEventImpl;
+import com.alibaba.rsocket.events.CloudEventsConsumer;
+import com.alibaba.rsocket.events.CloudEventsProcessor;
 import com.alibaba.rsocket.health.RSocketServiceHealth;
 import com.alibaba.rsocket.listen.RSocketResponderHandlerFactory;
 import com.alibaba.rsocket.observability.MetricsService;
 import com.alibaba.rsocket.route.RoutingEndpoint;
 import com.alibaba.rsocket.rpc.LocalReactiveServiceCaller;
 import com.alibaba.rsocket.rpc.RSocketResponderHandler;
+import com.alibaba.rsocket.upstream.ServiceInstancesChangedEventConsumer;
 import com.alibaba.rsocket.upstream.UpstreamCluster;
-import com.alibaba.rsocket.upstream.UpstreamClusterChangedEventProcessor;
+import com.alibaba.rsocket.upstream.UpstreamClusterChangedEventConsumer;
 import com.alibaba.rsocket.upstream.UpstreamManager;
-import com.alibaba.rsocket.upstream.UpstreamManagerImpl;
 import com.alibaba.spring.boot.rsocket.health.RSocketServiceHealthImpl;
 import com.alibaba.spring.boot.rsocket.observability.MetricsServicePrometheusImpl;
 import com.alibaba.spring.boot.rsocket.responder.RSocketServicesPublishHook;
@@ -21,16 +23,14 @@ import com.alibaba.spring.boot.rsocket.responder.invocation.RSocketServiceAnnota
 import com.alibaba.spring.boot.rsocket.upstream.JwtTokenNotFoundException;
 import com.alibaba.spring.boot.rsocket.upstream.RSocketRequesterSupportBuilderImpl;
 import com.alibaba.spring.boot.rsocket.upstream.RSocketRequesterSupportCustomizer;
+import com.alibaba.spring.boot.rsocket.upstream.SmartLifecycleUpstreamManagerImpl;
 import io.micrometer.prometheus.PrometheusMeterRegistry;
 import io.rsocket.SocketAcceptor;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.autoconfigure.condition.*;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.web.context.WebServerInitializedEvent;
 import org.springframework.context.ApplicationContext;
@@ -41,14 +41,17 @@ import org.springframework.core.env.Environment;
 import reactor.core.publisher.Mono;
 import reactor.extra.processor.TopicProcessor;
 
+import java.util.stream.Collectors;
+
 
 /**
  * RSocket Auto configuration: listen, upstream manager, handler etc
  *
  * @author leijuan
  */
-@SuppressWarnings({"rawtypes", "SpringJavaInjectionPointsAutowiringInspection"})
+@SuppressWarnings({"rawtypes"})
 @Configuration
+@ConditionalOnExpression("${rsocket.disabled:false}==false")
 @EnableConfigurationProperties(RSocketProperties.class)
 public class RSocketAutoConfiguration {
     @Autowired
@@ -60,21 +63,36 @@ public class RSocketAutoConfiguration {
     @Autowired
     private ApplicationContext applicationContext;
 
+    // section cloudevents processor
     @Bean
     public TopicProcessor<CloudEventImpl> reactiveCloudEventProcessor() {
         return TopicProcessor.<CloudEventImpl>builder().name("cloud-events-processor").build();
     }
 
     @Bean(initMethod = "init")
-    public UpstreamClusterChangedEventProcessor upstreamClusterChangedEventProcessor(
-            @Autowired UpstreamManager upstreamManager,
-            @Autowired @Qualifier("reactiveCloudEventProcessor") TopicProcessor<CloudEventImpl> eventProcessor) {
-        return new UpstreamClusterChangedEventProcessor(upstreamManager, eventProcessor);
+    public CloudEventsProcessor cloudEventsProcessor(@Autowired @Qualifier("reactiveCloudEventProcessor") TopicProcessor<CloudEventImpl> eventProcessor,
+                                                     ObjectProvider<CloudEventsConsumer> consumers) {
+        return new CloudEventsProcessor(eventProcessor, consumers.stream().collect(Collectors.toList()));
     }
 
-/*    @Bean(initMethod = "init")
-    public InvalidCacheEventProcessor invalidCacheEventProcessor() {
-        return new InvalidCacheEventProcessor();
+    @Bean
+    public UpstreamClusterChangedEventConsumer upstreamClusterChangedEventConsumer(@Autowired UpstreamManager upstreamManager) {
+        return new UpstreamClusterChangedEventConsumer(upstreamManager);
+    }
+
+    @Bean
+    public ServiceInstancesChangedEventConsumer serviceInstancesChangedEventConsumer(@Autowired UpstreamManager upstreamManager) {
+        return new ServiceInstancesChangedEventConsumer(upstreamManager);
+    }
+
+    @Bean
+    public CloudEventToListenerConsumer cloudEventToListenerConsumer() {
+        return new CloudEventToListenerConsumer();
+    }
+
+  /*  @Bean
+    public InvalidCacheEventConsumer invalidCacheEventConsumer() {
+        return new InvalidCacheEventConsumer();
     }*/
 
     /**
@@ -122,9 +140,9 @@ public class RSocketAutoConfiguration {
         return new RSocketServiceAnnotationProcessor(rsocketProperties);
     }
 
-    @Bean(initMethod = "init", destroyMethod = "close")
+    @Bean(initMethod = "init")
     public UpstreamManager rsocketUpstreamManager(@Autowired RSocketRequesterSupport rsocketRequesterSupport) throws JwtTokenNotFoundException {
-        UpstreamManager upstreamManager = new UpstreamManagerImpl(rsocketRequesterSupport);
+        SmartLifecycleUpstreamManagerImpl upstreamManager = new SmartLifecycleUpstreamManagerImpl(rsocketRequesterSupport);
         if (properties.getBrokers() != null && !properties.getBrokers().isEmpty()) {
             if (properties.getJwtToken() == null || properties.getJwtToken().isEmpty()) {
                 throw new JwtTokenNotFoundException();
@@ -133,6 +151,7 @@ public class RSocketAutoConfiguration {
             cluster.setUris(properties.getBrokers());
             upstreamManager.add(cluster);
         }
+        upstreamManager.setP2pServices(properties.getP2pServices());
         if (properties.getRoutes() != null && !properties.getRoutes().isEmpty()) {
             for (RoutingEndpoint route : properties.getRoutes()) {
                 UpstreamCluster cluster = new UpstreamCluster(route.getGroup(), route.getService(), route.getVersion());
